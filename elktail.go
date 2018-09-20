@@ -10,10 +10,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/codegangsta/cli"
+	"github.com/olivere/elastic"
+	"github.com/zalando/go-keyring"
 	"golang.org/x/crypto/ssh/terminal"
 	"golang.org/x/net/context"
-	"gopkg.in/olivere/elastic.v5"
 	"io/ioutil"
+	"net/http"
 	"net/url"
 	"os"
 	"regexp"
@@ -368,6 +370,23 @@ func findLastIndex(indices []string, indexPattern string) string {
 	}
 	return lastIdx
 }
+func authOk(url, username, password string) bool {
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", url, nil)
+	req.SetBasicAuth(username, password)
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Println(err)
+	}
+	if resp.StatusCode == 401 {
+		fmt.Println("User is unauthorized to access ", url)
+		return false
+	} else {
+		fmt.Println(resp)
+		return true
+	}
+
+}
 
 func main() {
 
@@ -413,8 +432,10 @@ func main() {
 		}
 
 		if config.User != "" {
-			fmt.Print("Enter password: ")
-			config.Password = readPasswd()
+			var url = config.SearchTarget.Url
+			fmt.Println(url)
+			config.Password = readPasswd(config.User)
+			fmt.Println(config.Password)
 		}
 
 		//reset TunnelUrl to nothing, we'll point to the tunnel if we actually manage to create it
@@ -472,6 +493,7 @@ func main() {
 
 		tail.Start(!config.IsListOnly(), config.InitialEntries)
 	}
+	fmt.Println("It is here")
 
 	app.Run(os.Args)
 
@@ -486,14 +508,74 @@ func Must(result bool, err error) bool {
 	return result
 }
 
+// Ask for confirmation
+func Ask4confirm() bool {
+	var s string
+
+	fmt.Printf("(y/N): ")
+	_, err := fmt.Scan(&s)
+	if err != nil {
+		panic(err)
+	}
+
+	s = strings.TrimSpace(s)
+	s = strings.ToLower(s)
+
+	if s == "y" || s == "yes" {
+		return true
+	}
+	return false
+}
+
 // Read password from the console
-func readPasswd() string {
+func passwordFromConsole() string {
+	fmt.Print("Enter password: ")
 	bytePassword, err := terminal.ReadPassword(0)
 	if err != nil {
 		Error.Fatalln("Failed to read password.")
 	}
 	fmt.Println()
-	return string(bytePassword)
+	password := string(bytePassword)
+	return password
+}
+
+type KeyRingPassword struct {
+	ServiceName string
+	User        string
+	Password    string
+}
+
+func updateKeyRing(data KeyRingPassword) bool {
+	err := keyring.Set(data.ServiceName, data.User, data.Password)
+	if err != nil {
+		Error.Fatalln("Updating keyring failed. Service: ", data.ServiceName, "User: ", data.User)
+	}
+	return true
+}
+
+func getPasswordFromKeyring()
+
+func readPasswd(user string) string {
+	data = KeyRingPassword {
+		ServiceName: 
+	}
+	if err != nil {
+		password := passwordFromConsole()
+		err = keyring.Set(service, user, password)
+		if err != nil {
+			Error.Fatalln(err)
+		}
+	} else {
+		fmt.Println("secret", secret)
+		if authOk(url, config.User, config.Password) {
+			password = secret
+		} else {
+			fmt.Println("The user is unauthorized to access ", url)
+			p := passwordFromConsole()
+		}
+	}
+	fmt.Println("returning password", password)
+	return password
 }
 
 // EvaluateExpression Expression evaluation function. It uses map as a model and evaluates expression given as
