@@ -545,28 +545,30 @@ type KeyRingPassword struct {
 	Password    string
 }
 
-func updateKeyRing(data KeyRingPassword) bool {
-	err := keyring.Set(data.ServiceName, data.User, data.Password)
+func updateKeyRing(data KeyRingPassword) error {
+	return keyring.Set(data.ServiceName, data.User, data.Password)
 	if err != nil {
 		Error.Fatalln("Updating keyring failed. Service: ", data.ServiceName, "User: ", data.User)
 	}
-	return true
 }
 
-func getPasswordFromKeyring()
+func getPasswordFromKeyring(data *KeyRingPassword) {
+
+}
 
 func readPasswd(user string) string {
-	data = KeyRingPassword {
-		ServiceName: 
+	data = KeyRingPassword{
+		ServiceName: "elktail",
+		User:        user,
 	}
+	secret, err := getPasswordFromKeyring(&data)
+	fmt.Println("secret", secret)
 	if err != nil {
-		password := passwordFromConsole()
-		err = keyring.Set(service, user, password)
-		if err != nil {
+		data.Password = passwordFromConsole()
+		if err = updateKeyRing(data); err != nil {
 			Error.Fatalln(err)
 		}
 	} else {
-		fmt.Println("secret", secret)
 		if authOk(url, config.User, config.Password) {
 			password = secret
 		} else {
