@@ -177,7 +177,7 @@ func parsePort(portStr string, defaultPort int) int {
 }
 
 func passwordCallback(user string) string {
-	pwd := readPasswd(user)
+	pwd := readPasswd(user, nil)
 	return pwd
 }
 

@@ -381,10 +381,8 @@ func authOk(url, username, password string) bool {
 	if resp.StatusCode == 401 {
 		fmt.Println("User is unauthorized to access ", url)
 		return false
-	} else {
-		fmt.Println(resp)
-		return true
 	}
+	return true
 
 }
 
@@ -432,10 +430,7 @@ func main() {
 		}
 
 		if config.User != "" {
-			var url = config.SearchTarget.Url
-			fmt.Println(url)
-			config.Password = readPasswd(config.User)
-			fmt.Println(config.Password)
+			config.Password = readPasswd(config.User, config)
 		}
 
 		//reset TunnelUrl to nothing, we'll point to the tunnel if we actually manage to create it
@@ -547,37 +542,37 @@ type KeyRingPassword struct {
 
 func updateKeyRing(data KeyRingPassword) error {
 	return keyring.Set(data.ServiceName, data.User, data.Password)
-	if err != nil {
-		Error.Fatalln("Updating keyring failed. Service: ", data.ServiceName, "User: ", data.User)
-	}
 }
 
-func getPasswordFromKeyring(data *KeyRingPassword) {
-
+func getPasswordFromKeyring(data *KeyRingPassword) (string, error) {
+	return keyring.Get(data.ServiceName, data.User)
 }
 
-func readPasswd(user string) string {
-	data = KeyRingPassword{
+func readPasswd(user string, config *Configuration) string {
+	data := KeyRingPassword{
 		ServiceName: "elktail",
 		User:        user,
 	}
 	secret, err := getPasswordFromKeyring(&data)
-	fmt.Println("secret", secret)
 	if err != nil {
 		data.Password = passwordFromConsole()
 		if err = updateKeyRing(data); err != nil {
 			Error.Fatalln(err)
 		}
 	} else {
-		if authOk(url, config.User, config.Password) {
-			password = secret
+		data.Password = secret
+		fmt.Println("Retrieved a password from keyring")
+		if authOk(config.SearchTarget.Url, config.User, data.Password) {
+			data.Password = secret
 		} else {
-			fmt.Println("The user is unauthorized to access ", url)
-			p := passwordFromConsole()
+			fmt.Println("The user is unauthorized to access ", config.SearchTarget.Url)
+			data.Password = passwordFromConsole()
+			if err = updateKeyRing(data); err != nil {
+				Error.Fatalln(err)
+			}
 		}
 	}
-	fmt.Println("returning password", password)
-	return password
+	return data.Password
 }
 
 // EvaluateExpression Expression evaluation function. It uses map as a model and evaluates expression given as
