@@ -1,9 +1,6 @@
 [[constraint]]
   name = "github.com/olivere/elastic"
-  version = "6.2.8"
-[[constraint]]
-  branch = "master"
-  name = "github.com/zalando/go-keyring"
+  version = "6.2.11"
 [[constraint]]
   branch = "master"
   name = "golang.org/x/crypto"

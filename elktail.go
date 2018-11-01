@@ -10,10 +10,10 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"github.com/olivere/elastic"
 	"github.com/urfave/cli"
 	"golang.org/x/crypto/ssh/terminal"
 	"golang.org/x/net/context"
-	"gopkg.in/olivere/elastic.v5"
 	"io/ioutil"
 	"net/http"
 	"net/url"
@@ -90,7 +90,7 @@ func NewTail(configuration *Configuration) *Tail {
 	if cert != "" && key != "" {
 		cert, err := tls.LoadX509KeyPair(cert, key)
 		if err != nil {
-		    Error.Fatalf("Bad certificate and/or key: %s", err)
+			Error.Fatalf("Bad certificate and/or key: %s", err)
 		}
 		tlsConfig := &tls.Config{
 			Certificates: []tls.Certificate{cert},
