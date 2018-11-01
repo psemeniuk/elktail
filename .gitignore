@@ -18,3 +18,4 @@ vendor/
 release/
 release.sh
 *.swp
+elktail
