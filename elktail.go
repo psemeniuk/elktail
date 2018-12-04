@@ -532,23 +532,28 @@ func EvaluateExpression(model interface{}, fieldExpression string) (string, erro
 	if fieldExpression == "" {
 		return fmt.Sprintf("%v", model), nil
 	}
-	parts := strings.SplitN(fieldExpression, ".", 2)
-	expression := parts[0]
 	var nextModel interface{}
+	nextExpression := ""
 	modelMap, ok := model.(map[string]interface{})
 	if ok {
-		value := modelMap[expression]
+		value := modelMap[fieldExpression]
 		if value != nil {
 			nextModel = value
 		} else {
-			return "", fmt.Errorf("Failed to evaluate expression %s on given model (model map does not contain that key?).", fieldExpression)
+			parts := strings.SplitN(fieldExpression, ".", 2)
+			expression := parts[0]
+			if len(parts) > 1 {
+				nextExpression = parts[1]
+			}
+			value = modelMap[expression]
+			if value != nil {
+				nextModel = value
+			} else {
+				return "", fmt.Errorf("Failed to evaluate expression %s on given model %+v (model map does not contain that key?).", fieldExpression, modelMap)
+			}
 		}
 	} else {
 		return "", fmt.Errorf("Model on which %s is to be evaluated is not a map.", fieldExpression)
-	}
-	nextExpression := ""
-	if len(parts) > 1 {
-		nextExpression = parts[1]
 	}
 	return EvaluateExpression(nextModel, nextExpression)
 }
