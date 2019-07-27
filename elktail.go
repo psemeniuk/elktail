@@ -76,8 +76,9 @@ func NewTail(configuration *Configuration) *Tail {
 	defaultOptions := []elastic.ClientOptionFunc{
 		elastic.SetURL(url),
 		elastic.SetSniff(false),
-		elastic.SetHealthcheckTimeoutStartup(10 * time.Second),
-		elastic.SetHealthcheckTimeout(2 * time.Second),
+		elastic.SetHealthcheck(false),
+		//elastic.SetHealthcheckTimeoutStartup(10 * time.Second),
+		//elastic.SetHealthcheckTimeout(2 * time.Second),
 	}
 
 	if configuration.User != "" {
@@ -106,6 +107,18 @@ func NewTail(configuration *Configuration) *Tail {
 			elastic.SetTraceLog(Trace))
 	}
 
+
+	version, err := ResolveKibanaVersion(url)
+	if err != nil {
+		Info.Println("Cannot resolve kibana version", err)
+		version = ""
+	}
+
+	httpClient := &http.Client{
+		Transport: KibanaDecorator{r: http.DefaultTransport, kibanaVersion: version},
+	}
+	defaultOptions = append(defaultOptions, elastic.SetHttpClient(httpClient))
+
 	client, err = elastic.NewClient(defaultOptions...)
 
 	if err != nil {
@@ -131,7 +144,9 @@ func NewTail(configuration *Configuration) *Tail {
 func (tail *Tail) selectIndices(configuration *Configuration) {
 	result, err := tail.client.CatIndices().Do(context.TODO())
 	if err != nil {
-		Error.Fatalln("Could not fetch available indices.", err)
+		Info.Println("Could not fetch available indices. Using pattern instead.", err)
+		tail.indices = []string{configuration.SearchTarget.IndexPattern}
+		return
 	}
 	indices := make([]string, len(result))
 	for i, response := range result {
@@ -174,14 +189,26 @@ func (tail *Tail) Start(follow bool, initialEntries int) {
 	for follow {
 		time.Sleep(delay)
 		if tail.lastTimeStamp != "" {
-			//we can execute follow up timestamp filtered query only if we fetched at least 1 result in initial query
-			result, err = tail.client.Search().
-				Index(tail.indices...).
+			searchRequest := elastic.NewSearchRequest().
 				Sort(tail.queryDefinition.TimestampField, false).
 				From(0).
 				Size(9000). //TODO: needs rewrite this using scrolling, as this implementation may loose entries if there's more than 9K entries per sleep period
-				Query(tail.buildTimestampFilteredQuery()).
+				Query(tail.buildTimestampFilteredQuery())
+
+			//we can execute follow up timestamp filtered query only if we fetched at least 1 result in initial query
+			multiResult, e := tail.client.MultiSearch().
+				Index(tail.indices...).
+				Add(searchRequest).
 				Do(context.Background())
+
+			if multiResult != nil {
+				result = multiResult.Responses[0]
+				err = nil
+			} else {
+				result =  nil
+				err = e
+			}
+
 		} else {
 			//if lastTimeStamp is not defined we have to repeat the initial search until we get at least 1 result
 			result, err = tail.initialSearch(initialEntries)
@@ -203,12 +230,20 @@ func (tail *Tail) Start(follow bool, initialEntries int) {
 // Initial search needs to be run until we get at least one result
 // in order to fetch the timestamp which we will use in subsequent follow searches
 func (tail *Tail) initialSearch(initialEntries int) (*elastic.SearchResult, error) {
-	return tail.client.Search().
-		Index(tail.indices...).
+	searchRequest := elastic.NewSearchRequest().
 		Sort(tail.queryDefinition.TimestampField, tail.order).
 		Query(tail.buildSearchQuery()).
-		From(0).Size(initialEntries).
+		From(0).Size(initialEntries)
+
+	result, e := tail.client.MultiSearch().
+		Index(tail.indices...).
+		Add(searchRequest).
 		Do(context.Background())
+	if result != nil {
+		return result.Responses[0], nil
+	} else {
+		return nil, e
+	}
 }
 
 // Process the results (e.g. prints them out based on configured format)
@@ -559,4 +594,46 @@ func EvaluateExpression(model interface{}, fieldExpression string) (string, erro
 		return "", fmt.Errorf("Model on which %s is to be evaluated is not a map.", fieldExpression)
 	}
 	return EvaluateExpression(nextModel, nextExpression)
+}
+
+type KibanaDecorator struct {
+	r http.RoundTripper
+	kibanaVersion string
+}
+
+func (mrt KibanaDecorator) RoundTrip(r *http.Request) (*http.Response, error) {
+	if strings.Contains(r.URL.Path, "_msearch") {
+		r.URL.Path = "/elasticsearch/_msearch"
+		r.Method = "POST"
+		r.Header.Add("kbn-version", mrt.kibanaVersion)
+		q := r.URL.Query()
+		q.Add("rest_total_hits_as_int", "true")
+		q.Add("ignore_throttled", "true")
+		r.URL.RawQuery = q.Encode()
+	}
+	return mrt.r.RoundTrip(r)
+}
+
+func ResolveKibanaVersion(url string) (string, error) {
+	resp, err := http.DefaultClient.Get(url + "/api/status")
+	if err != nil {
+		return "", err
+	}
+
+	statusResponse := new(StatusResponse)
+	err = json.NewDecoder(resp.Body).Decode(&statusResponse)
+
+	if err != nil {
+		return "", err
+	}
+
+	return statusResponse.version.number, nil
+}
+
+type StatusResponse struct {
+	version VersionResponse
+}
+
+type VersionResponse struct {
+	number string
 }
