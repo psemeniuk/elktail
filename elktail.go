@@ -10,10 +10,10 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"github.com/olivere/elastic"
 	"github.com/urfave/cli"
 	"golang.org/x/crypto/ssh/terminal"
 	"golang.org/x/net/context"
+	"gopkg.in/olivere/elastic.v6"
 	"io/ioutil"
 	"net/http"
 	"net/url"
@@ -129,9 +129,13 @@ func NewTail(configuration *Configuration) *Tail {
 // Selects appropriate indices in EL based on configuration. This basically means that if query is date filtered,
 // then it attempts to select indices in the filtered date range, otherwise it selects the last index.
 func (tail *Tail) selectIndices(configuration *Configuration) {
-	indices, err := tail.client.IndexNames()
+	result, err := tail.client.CatIndices().Do(context.TODO())
 	if err != nil {
 		Error.Fatalln("Could not fetch available indices.", err)
+	}
+	indices := make([]string, len(result))
+	for i, response := range result {
+		indices[i] = response.Index
 	}
 
 	if configuration.QueryDefinition.IsDateTimeFiltered() {
@@ -217,7 +221,7 @@ func (tail *Tail) processResults(searchResult *elastic.SearchResult) {
 	// When tailing, we will
 	// issue next query which will be filtered so that timestamps are greater or
 	// equal to last timestamp minus tailing time window. Since we are tracking IDs of entries form previous query,
-	// we can use the IDs to remove the duplicates. https://github.com/bonovoxly/elktail/issues/11
+	// we can use the IDs to remove the duplicates. https://github.com/knes1/elktail/issues/11
 
 	if tail.order {
 		for i := 0; i < len(hits); i++ {
@@ -495,7 +499,6 @@ func main() {
 		tail := NewTail(config)
 		//If we don't exit here we can save the defaults
 		configToSave.SaveDefault()
-
 		tail.Start(!config.IsListOnly(), config.InitialEntries)
 	}
 
