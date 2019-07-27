@@ -20,12 +20,11 @@ type SearchTarget struct {
 	IndexPattern string
 	Cert         string
 	Key          string
+	ExtraHeaders []string
 }
 
 type QueryDefinition struct {
 	Terms          []string
-	Format         string
-	Raw            bool
 	TimestampField string
 	AfterDateTime  string `json:"-"`
 	BeforeDateTime string `json:"-"`
@@ -35,9 +34,9 @@ type Configuration struct {
 	SearchTarget    SearchTarget
 	QueryDefinition QueryDefinition
 	InitialEntries  int
-	ListOnly        bool `json:"-"`
+	Follow          bool `json:"-"`
 	User            string
-	Password        string `json:"-"`
+	Password        string
 	Verbose         bool   `json:"-"`
 	MoreVerbose     bool   `json:"-"`
 	TraceRequests   bool   `json:"-"`
@@ -49,7 +48,7 @@ var confDir = ".elktail"
 var defaultConfFile = "default.json"
 
 //When changing this array, make sure to also make appropriate changes in CopyConfigRelevantSettingsTo
-var configRelevantFlags = []string{"url", "f", "i", "t", "u", "ssh"}
+var configRelevantFlags = []string{"url", "i", "t", "u", "ssh"}
 
 func userHomeDir() string {
 	if runtime.GOOS == "windows" {
@@ -76,13 +75,16 @@ func (c *Configuration) CopyConfigRelevantSettingsTo(dest *Configuration) {
 	//copy config relevant configuration settings
 	dest.SearchTarget.TunnelUrl = c.SearchTarget.TunnelUrl
 	dest.SearchTarget.Url = c.SearchTarget.Url
+	dest.SearchTarget.ExtraHeaders = make([]string, len(c.SearchTarget.ExtraHeaders))
+	copy(dest.SearchTarget.ExtraHeaders, c.SearchTarget.ExtraHeaders)
 	dest.SearchTarget.Cert = c.SearchTarget.Cert
 	dest.SearchTarget.Key = c.SearchTarget.Key
 	dest.SearchTarget.IndexPattern = c.SearchTarget.IndexPattern
-	dest.QueryDefinition.Format = c.QueryDefinition.Format
 	dest.QueryDefinition.Terms = make([]string, len(c.QueryDefinition.Terms))
+	//dest.QueryDefinition.Raw = c.QueryDefinition.Raw
 	copy(dest.QueryDefinition.Terms, c.QueryDefinition.Terms)
 	dest.User = c.User
+	dest.Password = c.Password
 	dest.SSHTunnelParams = c.SSHTunnelParams
 }
 
@@ -91,9 +93,8 @@ func (c *Configuration) CopyNonConfigRelevantSettingsTo(dest *Configuration) {
 	dest.QueryDefinition.TimestampField = c.QueryDefinition.TimestampField
 	dest.QueryDefinition.AfterDateTime = c.QueryDefinition.AfterDateTime
 	dest.QueryDefinition.BeforeDateTime = c.QueryDefinition.BeforeDateTime
-	dest.ListOnly = c.ListOnly
+	dest.Follow = c.Follow
 	dest.InitialEntries = c.InitialEntries
-	dest.Password = c.Password
 	dest.Verbose = c.Verbose
 	dest.MoreVerbose = c.MoreVerbose
 	dest.TraceRequests = c.TraceRequests
@@ -152,12 +153,19 @@ func (config *Configuration) Flags() []cli.Flag {
 	cli.HelpFlag = cli.BoolFlag{
 		Name: "Show help",
 	}
+
 	return []cli.Flag{
 		cli.StringFlag{
 			Name:        "url",
 			Value:       "http://127.0.0.1:9200",
 			Usage:       "(*) ElasticSearch URL",
 			Destination: &config.SearchTarget.Url,
+		},
+		cli.StringSliceFlag{
+			Name:  "H,header",
+			Value: &cli.StringSlice{""},
+			Usage: "(*) Extra header passed to requests. Curl-like format.",
+			//Destination: &config.SearchTarget.ExtraHeaders,
 		},
 		cli.StringFlag{
 			Name:        "cert",
@@ -171,16 +179,10 @@ func (config *Configuration) Flags() []cli.Flag {
 			Usage:       "(*) key to use when accessing via TLS",
 			Destination: &config.SearchTarget.Key,
 		},
-		cli.StringFlag{
-			Name:        "f,format",
-			Value:       "%message",
-			Usage:       "(*) Message format for the entries - field names are referenced using % sign, for example '%@timestamp %message'",
-			Destination: &config.QueryDefinition.Format,
-		},
 		cli.BoolFlag{
-			Name:        "raw",
-			Usage:       "Just print raw JSON lines",
-			Destination: &config.QueryDefinition.Raw,
+			Name:        "f,follow",
+			Usage:       "Follow result, like tail -f",
+			Destination: &config.Follow,
 		},
 		cli.StringFlag{
 			Name:        "i,index-pattern",
@@ -193,11 +195,6 @@ func (config *Configuration) Flags() []cli.Flag {
 			Value:       "@timestamp",
 			Usage:       "(*) Timestamp field name used for tailing entries",
 			Destination: &config.QueryDefinition.TimestampField,
-		},
-		cli.BoolFlag{
-			Name:        "l,list-only",
-			Usage:       "Just list the results once, do not follow",
-			Destination: &config.ListOnly,
 		},
 		cli.IntFlag{
 			Name:        "n",
@@ -225,7 +222,7 @@ func (config *Configuration) Flags() []cli.Flag {
 		cli.StringFlag{
 			Name:        "u",
 			Value:       "",
-			Usage:       "(*) Username for http basic auth, password is supplied over password prompt",
+			Usage:       "(*) Username and password for authentication. curl-like format (separated by colon)",
 			Destination: &config.User,
 		},
 		cli.StringFlag{
@@ -256,7 +253,7 @@ func (config *Configuration) Flags() []cli.Flag {
 
 //Elktail will work in list-only (no follow) mode if appropriate flag is set or if query has date-time filtering enabled
 func (c *Configuration) IsListOnly() bool {
-	return c.ListOnly || c.QueryDefinition.IsDateTimeFiltered()
+	return !c.Follow || c.QueryDefinition.IsDateTimeFiltered()
 }
 
 func (q *QueryDefinition) IsDateTimeFiltered() bool {

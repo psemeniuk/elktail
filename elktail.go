@@ -44,9 +44,6 @@ func (entry *displayedEntry) isBefore(timeStamp string) bool {
 	return entry.timeStamp < timeStamp
 }
 
-// Regexp for parsing out format fields
-var formatRegexp = regexp.MustCompile("%[A-Za-z0-9@_.-]+")
-
 const dateFormatDMY = "2006-01-02"
 const dateFormatFull = "2006-01-02T15:04:05.999Z07:00"
 const tailingTimeWindow = 500
@@ -76,14 +73,15 @@ func NewTail(configuration *Configuration) *Tail {
 	defaultOptions := []elastic.ClientOptionFunc{
 		elastic.SetURL(url),
 		elastic.SetSniff(false),
-		elastic.SetHealthcheckTimeoutStartup(10 * time.Second),
-		elastic.SetHealthcheckTimeout(2 * time.Second),
+		elastic.SetHealthcheck(false),
+		//elastic.SetHealthcheckTimeoutStartup(10 * time.Second),
+		//elastic.SetHealthcheckTimeout(2 * time.Second),
 	}
 
-	if configuration.User != "" {
-		defaultOptions = append(defaultOptions,
-			elastic.SetBasicAuth(configuration.User, configuration.Password))
-	}
+	//if configuration.User != "" {
+	//	defaultOptions = append(defaultOptions,
+	//		elastic.SetBasicAuth(configuration.User, configuration.Password))
+	//}
 
 	var cert = configuration.SearchTarget.Cert
 	var key = configuration.SearchTarget.Key
@@ -106,6 +104,24 @@ func NewTail(configuration *Configuration) *Tail {
 			elastic.SetTraceLog(Trace))
 	}
 
+	extraHeaders := map[string]string{}
+
+	for _, header := range configuration.SearchTarget.ExtraHeaders {
+		if header != "" {
+			tokenized := ExtractHeader(header)
+			extraHeaders[tokenized[0]] = tokenized[1]
+		}
+	}
+
+	version, err := ResolveKibanaVersion(url, extraHeaders)
+	if err != nil {
+		Info.Println("Cannot resolve kibana version", err)
+		version = ""
+	}
+
+	httpClient := &http.Client{Transport: KibanaDecorator{r: http.DefaultTransport, kibanaVersion: version, extraHeaders: extraHeaders, configuration: configuration}}
+	defaultOptions = append(defaultOptions, elastic.SetHttpClient(httpClient))
+
 	client, err = elastic.NewClient(defaultOptions...)
 
 	if err != nil {
@@ -115,7 +131,8 @@ func NewTail(configuration *Configuration) *Tail {
 
 	tail.queryDefinition = &configuration.QueryDefinition
 
-	tail.selectIndices(configuration)
+	tail.indices = []string{configuration.SearchTarget.IndexPattern}
+	//tail.selectIndices(configuration)
 
 	//If we're date filtering on start date, then the sort needs to be ascending
 	if configuration.QueryDefinition.AfterDateTime != "" {
@@ -131,7 +148,9 @@ func NewTail(configuration *Configuration) *Tail {
 func (tail *Tail) selectIndices(configuration *Configuration) {
 	result, err := tail.client.CatIndices().Do(context.TODO())
 	if err != nil {
-		Error.Fatalln("Could not fetch available indices.", err)
+		Info.Println("Could not fetch available indices. Using pattern instead.", err)
+		tail.indices = []string{configuration.SearchTarget.IndexPattern}
+		return
 	}
 	indices := make([]string, len(result))
 	for i, response := range result {
@@ -174,14 +193,26 @@ func (tail *Tail) Start(follow bool, initialEntries int) {
 	for follow {
 		time.Sleep(delay)
 		if tail.lastTimeStamp != "" {
-			//we can execute follow up timestamp filtered query only if we fetched at least 1 result in initial query
-			result, err = tail.client.Search().
-				Index(tail.indices...).
+			searchRequest := elastic.NewSearchRequest().
 				Sort(tail.queryDefinition.TimestampField, false).
 				From(0).
 				Size(9000). //TODO: needs rewrite this using scrolling, as this implementation may loose entries if there's more than 9K entries per sleep period
-				Query(tail.buildTimestampFilteredQuery()).
+				Query(tail.buildTimestampFilteredQuery())
+
+			//we can execute follow up timestamp filtered query only if we fetched at least 1 result in initial query
+			multiResult, e := tail.client.MultiSearch().
+				Index(tail.indices...).
+				Add(searchRequest).
 				Do(context.Background())
+
+			if multiResult != nil {
+				result = multiResult.Responses[0]
+				err = nil
+			} else {
+				result =  nil
+				err = e
+			}
+
 		} else {
 			//if lastTimeStamp is not defined we have to repeat the initial search until we get at least 1 result
 			result, err = tail.initialSearch(initialEntries)
@@ -203,12 +234,20 @@ func (tail *Tail) Start(follow bool, initialEntries int) {
 // Initial search needs to be run until we get at least one result
 // in order to fetch the timestamp which we will use in subsequent follow searches
 func (tail *Tail) initialSearch(initialEntries int) (*elastic.SearchResult, error) {
-	return tail.client.Search().
-		Index(tail.indices...).
+	searchRequest := elastic.NewSearchRequest().
 		Sort(tail.queryDefinition.TimestampField, tail.order).
 		Query(tail.buildSearchQuery()).
-		From(0).Size(initialEntries).
+		From(0).Size(initialEntries)
+
+	result, e := tail.client.MultiSearch().
+		Index(tail.indices...).
+		Add(searchRequest).
 		Do(context.Background())
+	if result != nil {
+		return result.Responses[0], nil
+	} else {
+		return nil, e
+	}
 }
 
 // Process the results (e.g. prints them out based on configured format)
@@ -276,28 +315,13 @@ func (tail *Tail) processHit(hit *elastic.SearchHit) map[string]interface{} {
 		Error.Fatalln("Failed parsing ElasticSearch response.", err)
 	}
 
-	if tail.queryDefinition.Raw {
-		fmt.Println(string(*hit.Source))
-	} else {
-		tail.printResult(entry)
-	}
+	//if tail.queryDefinition.Raw {
+	fmt.Println(string(*hit.Source))
+	//} else {
+	//	tail.printResult(entry)
+	//}
 
 	return entry
-}
-
-// Print result according to format
-func (tail *Tail) printResult(entry map[string]interface{}) {
-	Trace.Println("Result: ", entry)
-	fields := formatRegexp.FindAllString(tail.queryDefinition.Format, -1)
-	Trace.Println("Fields: ", fields)
-	result := tail.queryDefinition.Format
-	for _, f := range fields {
-		value, _ := EvaluateExpression(entry, f[1:])
-		result = strings.Replace(result, f, value, -1)
-	}
-	if len(result) > 0 {
-		fmt.Println(result)
-	}
 }
 
 func (tail *Tail) buildSearchQuery() elastic.Query {
@@ -410,6 +434,7 @@ func main() {
 	app.ArgsUsage = "[query-string]\n   Options marked with (*) are saved between invocations of the command. Each time you specify an option marked with (*) previously stored settings are erased."
 	app.Flags = config.Flags()
 	app.Action = func(c *cli.Context) {
+		config.SearchTarget.ExtraHeaders = c.StringSlice("header")
 
 		if c.IsSet("help") {
 			cli.ShowAppHelp(c)
@@ -443,8 +468,13 @@ func main() {
 		}
 
 		if config.User != "" {
-			fmt.Print("Enter password: ")
-			config.Password = readPasswd()
+			credentials := strings.Split(config.User, ":")
+			config.User = credentials[0]
+			if len(credentials) == 2 {
+				config.Password = credentials[1]
+			}
+			//fmt.Print("Enter password: ")
+			//config.Password = readPasswd()
 		}
 
 		//reset TunnelUrl to nothing, we'll point to the tunnel if we actually manage to create it
@@ -559,4 +589,151 @@ func EvaluateExpression(model interface{}, fieldExpression string) (string, erro
 		return "", fmt.Errorf("Model on which %s is to be evaluated is not a map.", fieldExpression)
 	}
 	return EvaluateExpression(nextModel, nextExpression)
+}
+
+type KibanaDecorator struct {
+	r http.RoundTripper
+	kibanaVersion string
+	extraHeaders map[string]string
+	configuration *Configuration
+	cookie AuthToken
+}
+
+func (mrt KibanaDecorator) RoundTrip(r *http.Request) (*http.Response, error) {
+	mrt.cookie = LoadToken(mrt.configuration)
+	if strings.Contains(r.URL.Path, "_msearch") {
+		r.URL.Path = "/elasticsearch/_msearch"
+		r.Method = "POST"
+
+		if mrt.kibanaVersion != "" {
+			r.Header.Add("kbn-version", mrt.kibanaVersion)
+		}
+
+		if mrt.cookie.token != "" {
+			r.AddCookie(&http.Cookie{
+				//HttpOnly: true,
+				Name: "sid-auth",
+				Value: mrt.cookie.token,
+			})
+		}
+
+		for k, v := range mrt.extraHeaders {
+			r.Header.Add(k, v)
+		}
+
+		q := r.URL.Query()
+		//q.Add("rest_total_hits_as_int", "true")
+		//q.Add("ignore_throttled", "true")
+		r.URL.RawQuery = q.Encode()
+	}
+	response, e := mrt.r.RoundTrip(r)
+
+	if e == nil && response.StatusCode == 302 && response.Header.Get("location") == "/login" {
+		e = mrt.cookie.Authenticate()
+		Error.Fatalln("Failed to authenticate. Please run again. If problem still occurs you have authenticate by passing valid credentials with -u flag")
+	}
+
+	return response, e
+}
+
+type AuthToken struct {
+	config *Configuration
+	token string
+}
+
+func LoadToken(config *Configuration) AuthToken {
+	confDirPath := userHomeDir() + string(os.PathSeparator) + confDir
+	confFile := confDirPath + string(os.PathSeparator) + "auth.cookie"
+	tokenBytes, err := ioutil.ReadFile(confFile)
+
+	if err != nil {
+		token := AuthToken{config: config}
+		err = token.Authenticate()
+		return token
+	}
+
+	return AuthToken{
+		config:config,
+		token: string(tokenBytes),
+	}
+}
+
+func (ths *AuthToken) Authenticate() error {
+	request, e := http.NewRequest("POST", ths.config.SearchTarget.Url+"/login", strings.NewReader(url.Values{
+		"username": []string{ths.config.User},
+		"password": []string{ths.config.Password},
+	}.Encode()))
+
+	if e == nil {
+		request.Header.Add("kbn-version", "6.2.4")
+		request.Header.Add("User-Agent", "elktail")
+		request.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+	}
+
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		}}
+
+	response, e := client.Do(request)
+	//response, e := http.PostForm(ths.config.SearchTarget.Url+"/login", url.Values{
+	//	"username": []string{ths.config.User},
+	//	"password": []string{ths.config.Password},
+	//})
+	if e != nil {
+		return e
+	}
+
+	for _, v := range response.Cookies() {
+		if v.Name == "sid-auth" {
+			ths.token = v.Value
+		}
+	}
+
+	if ths.token == "" {
+		return fmt.Errorf("bad credentials")
+	}
+
+	confDirPath := userHomeDir() + string(os.PathSeparator) + confDir
+	tokenFile := confDirPath + string(os.PathSeparator) + "auth.cookie"
+	return ioutil.WriteFile(tokenFile, []byte(ths.token), 0700)
+}
+
+func ResolveKibanaVersion(url string, extraHeaders map[string]string) (string, error) {
+	return "6.2.4", nil //TODO implement dynamic version resolving based on status endpoint
+	//req, _ := http.NewRequest("GET", url + "/api/status", nil)
+	//
+	//for k, v := range extraHeaders {
+	//	req.Header.Set(k, v)
+	//}
+	//
+	//resp, err := http.DefaultClient.Do(req)
+	//if err != nil {
+	//	return "", err
+	//}
+	//
+	//statusResponse := new(StatusResponse)
+	//err = json.NewDecoder(resp.Body).Decode(&statusResponse)
+	//
+	//if err != nil {
+	//	return "", err
+	//}
+	//
+	//return statusResponse.version.number, nil
+}
+
+type StatusResponse struct {
+	version VersionResponse
+}
+
+type VersionResponse struct {
+	number string
+}
+
+func ExtractHeader(s string) []string {
+	split := strings.Split(s, ":")
+	for k, v := range split {
+		split[k] = strings.Trim(v, " ")
+	}
+	return split
 }
